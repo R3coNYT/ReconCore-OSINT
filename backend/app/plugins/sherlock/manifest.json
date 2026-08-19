@@ -1,0 +1,21 @@
+{
+  "name": "sherlock",
+  "repository": "https://github.com/sherlock-project/sherlock",
+  "license": "MIT",
+  "upstream_version": "0.15.0",
+  "last_upstream_update": "2025-06-01",
+  "last_reviewed": "2026-08-19",
+  "install": "pip install sherlock-project",
+  "execution_mode": "subprocess",
+  "network": "outbound HTTP(S) to the public sites being tested",
+  "credentials_required": false,
+  "vendor_path": null,
+  "review_notes": [
+    "Sherlock checks whether a username exists using public HTTP requests.",
+    "A hit proves the username exists, NOT who owns the account.",
+    "It tests a large number of sites: keep concurrency low and respect quotas.",
+    "No credential is required; no secret is stored for this plugin.",
+    "On every upstream bump, re-check setup.py/pyproject and the absence of any dynamic download of the site list from a non-official source."
+  ],
+  "risk_level": "LOW"
+}

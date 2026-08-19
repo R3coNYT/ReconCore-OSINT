@@ -1,0 +1,1 @@
+"""Holehe plugin package."""

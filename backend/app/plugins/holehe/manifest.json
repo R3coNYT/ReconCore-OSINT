@@ -1,0 +1,21 @@
+{
+  "name": "holehe",
+  "repository": "https://github.com/megadose/holehe",
+  "license": "GPL-3.0",
+  "upstream_version": "1.61",
+  "last_upstream_update": "2023-11-01",
+  "last_reviewed": "2026-08-19",
+  "install": "pip install holehe",
+  "execution_mode": "subprocess (isolated Python driver)",
+  "network": "outbound HTTP(S) to public account-recovery endpoints",
+  "credentials_required": false,
+  "vendor_path": null,
+  "review_notes": [
+    "Modular architecture: one Python module per service, httpx calls only.",
+    "Upstream activity is low: watch for broken modules and false negatives.",
+    "GPL-3.0: integrated through a separate subprocess with no code linkage, so the rest of the platform is not affected by the licence.",
+    "Obfuscated responses (recovery email/phone) are stored verbatim.",
+    "A 'rate limited' result is NOT 'no account': it is stored as inconclusive."
+  ],
+  "risk_level": "LOW"
+}

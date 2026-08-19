@@ -1,0 +1,24 @@
+{
+  "name": "toutatis",
+  "repository": "https://github.com/megadose/toutatis",
+  "license": "GPL-3.0",
+  "upstream_version": "1.4",
+  "last_upstream_update": "2023-08-01",
+  "last_reviewed": "2026-08-19",
+  "install": "pip install toutatis",
+  "execution_mode": "subprocess (isolated Python driver, secret over stdin)",
+  "network": "outbound HTTPS to instagram.com",
+  "credentials_required": true,
+  "credentials_kind": "session cookie supplied manually (never a password)",
+  "vendor_path": null,
+  "enabled_by_default": false,
+  "review_notes": [
+    "OPTIONAL PLUGIN, DISABLED BY DEFAULT (TOUTATIS_ENABLED=false).",
+    "Never asks for a password; automates no login.",
+    "The sessionid cookie is encrypted at rest (Fernet) and passed over stdin.",
+    "No authentication or anti-abuse circumvention is implemented.",
+    "Using an account to collect data may breach Instagram's terms of service and get it suspended: the risk is displayed before activation.",
+    "Upstream activity is low: check compatibility on every version bump."
+  ],
+  "risk_level": "MEDIUM"
+}

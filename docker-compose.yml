@@ -1,0 +1,270 @@
+# =============================================================================
+# ReconCore OSINT - local / single-host orchestration.
+#
+# Network segmentation (see docs/SECURITY.md):
+#   data  : postgres <-> api, worker            (internal, no internet access)
+#   bus   : redis    <-> api, worker, tool workers
+#   edge  : nginx    <-> api, frontend
+#   Tool workers sit on `bus` plus `egress` (internet access) but NOT on `data`:
+#   they cannot reach PostgreSQL.
+#
+# Hardening applied to every tool container:
+#   no-new-privileges, cap_drop ALL, read_only, tmpfs, CPU/RAM/PID limits.
+#   Neither / nor the Docker socket is mounted anywhere.
+# =============================================================================
+
+x-tool-hardening: &tool-hardening
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+    - /home:size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  pids_limit: 256
+  mem_limit: 1g
+  cpus: 1.0
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-tool-env: &tool-env
+  CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/1}
+  CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  SECRET_KEY: ${SECRET_KEY}
+  RECONCORE_ENV: ${RECONCORE_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  PLUGIN_DEFAULT_TIMEOUT: ${PLUGIN_DEFAULT_TIMEOUT:-300}
+  OSINT_HTTP_PROXY: ${OSINT_HTTP_PROXY:-}
+  OSINT_HTTPS_PROXY: ${OSINT_HTTPS_PROXY:-}
+  # Tool workers deliberately receive NO POSTGRES_* variable.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-reconcore}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is missing from .env}
+      POSTGRES_DB: ${POSTGRES_DB:-reconcore}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-reconcore}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    networks: [bus]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      PHONEINFOGA_API_URL: ${PHONEINFOGA_API_URL:-http://phoneinfoga:5000}
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    networks: [data, bus, edge]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+
+  worker:
+    # Orchestrator: persistence, correlation, scoring, retention.
+    # The only worker with PostgreSQL access.
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      PHONEINFOGA_API_URL: ${PHONEINFOGA_API_URL:-http://phoneinfoga:5000}
+    command:
+      - celery
+      - -A
+      - app.workers.celery_app.celery_app
+      - worker
+      - --queues=default
+      - --concurrency=4
+      - --loglevel=INFO
+      - --hostname=orchestrator@%h
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    networks: [data, bus]
+    # The base image's healthcheck probes the HTTP API, which this service does
+    # not serve: replace it with a Celery ping.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app.celery_app inspect ping -t 10 | grep -q pong"]
+      interval: 60s
+      timeout: 15s
+      start_period: 30s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+
+  beat:
+    # Scheduler: hourly health probes, nightly retention.
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      POSTGRES_HOST: postgres
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    command:
+      - celery
+      - -A
+      - app.workers.celery_app.celery_app
+      - beat
+      - --loglevel=INFO
+      - --schedule=/tmp/celerybeat-schedule
+    depends_on:
+      redis: {condition: service_healthy}
+    networks: [data, bus]
+    # The scheduler serves nothing: the base image's HTTP healthcheck is disabled.
+    healthcheck:
+      disable: true
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+
+  # --------------------------------------------------------------------------
+  # Third-party tool workers: one container per tool, no DB and no host access.
+  # --------------------------------------------------------------------------
+
+  worker-sherlock:
+    <<: *tool-hardening
+    build:
+      context: .
+      dockerfile: docker/worker-sherlock.Dockerfile
+    environment: *tool-env
+    depends_on:
+      redis: {condition: service_healthy}
+    networks: [bus, egress]
+
+  worker-holehe:
+    <<: *tool-hardening
+    build:
+      context: .
+      dockerfile: docker/worker-holehe.Dockerfile
+    environment: *tool-env
+    depends_on:
+      redis: {condition: service_healthy}
+    networks: [bus, egress]
+
+  worker-phoneinfoga:
+    <<: *tool-hardening
+    build:
+      context: .
+      dockerfile: docker/worker-phoneinfoga.Dockerfile
+    environment:
+      <<: *tool-env
+      PHONEINFOGA_API_URL: ${PHONEINFOGA_API_URL:-http://phoneinfoga:5000}
+      SEARCH_PROVIDER: ${SEARCH_PROVIDER:-none}
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-}
+      SERPAPI_API_KEY: ${SERPAPI_API_KEY:-}
+      BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
+    depends_on:
+      redis: {condition: service_healthy}
+    networks: [bus, egress]
+
+  phoneinfoga:
+    # Official third-party binary, isolated in its own container, exposing only
+    # its REST API on the internal `egress` network.
+    image: sundowndev/phoneinfoga:latest
+    restart: unless-stopped
+    command: ["serve", "--no-client"]
+    networks: [egress]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 128
+    mem_limit: 512m
+
+  worker-toutatis:
+    # OPTIONAL: start with `docker compose --profile toutatis up -d`
+    <<: *tool-hardening
+    profiles: [toutatis]
+    build:
+      context: .
+      dockerfile: docker/worker-toutatis.Dockerfile
+    environment:
+      <<: *tool-env
+      TOUTATIS_ENABLED: ${TOUTATIS_ENABLED:-false}
+    depends_on:
+      redis: {condition: service_healthy}
+    networks: [bus, egress]
+
+  # --------------------------------------------------------------------------
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        VITE_API_URL: /api/v1
+    restart: unless-stopped
+    networks: [edge]
+    security_opt:
+      - no-new-privileges:true
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on: [api, frontend]
+    networks: [edge]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  data:
+    internal: true      # no internet access for the database
+  bus:
+    internal: true      # task bus: no internet access
+  edge:
+  egress:               # internet access for the OSINT tools only

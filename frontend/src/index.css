@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body { background: #0b0f14; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: #0b0f14; }
+  ::-webkit-scrollbar-thumb { background: #26303d; border-radius: 6px; }
+}
+
+@layer components {
+  .card {
+    @apply bg-base-800 border border-line rounded-lg;
+  }
+  .card-header {
+    @apply px-4 py-3 border-b border-line text-sm font-semibold text-slate-300 uppercase tracking-wide;
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium border border-line bg-base-700 hover:bg-base-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply bg-accent-soft border-accent-soft text-base-900 hover:bg-accent;
+  }
+  .btn-danger { @apply border-danger/50 text-danger hover:bg-danger/10; }
+  .input {
+    @apply w-full px-3 py-2 rounded-md bg-base-900 border border-line text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent;
+  }
+  .label { @apply block text-xs uppercase tracking-wide text-slate-500 mb-1; }
+  .table { @apply w-full text-sm; }
+  .table th {
+    @apply text-left px-3 py-2 text-xs uppercase tracking-wide text-slate-500 border-b border-line font-medium;
+  }
+  .table td { @apply px-3 py-2 border-b border-line/60 align-top; }
+  .tab {
+    @apply px-3 py-2 text-sm border-b-2 border-transparent text-slate-400 hover:text-slate-200 whitespace-nowrap;
+  }
+  .tab-active { @apply border-accent text-accent; }
+}

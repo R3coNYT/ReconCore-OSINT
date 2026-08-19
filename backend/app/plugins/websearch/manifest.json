@@ -1,0 +1,18 @@
+{
+  "name": "websearch",
+  "repository": "in-house (ReconCore)",
+  "license": "AGPL-3.0",
+  "upstream_version": "1.0.0",
+  "last_upstream_update": "2026-08-19",
+  "last_reviewed": "2026-08-19",
+  "install": "bundled",
+  "execution_mode": "in-process (official APIs only)",
+  "network": "outbound HTTPS to the configured provider's API; no request at all when SEARCH_PROVIDER=none",
+  "credentials_required": false,
+  "vendor_path": null,
+  "review_notes": [
+    "No result-page scraping: official APIs only.",
+    "With no provider configured, the plugin only produces queries."
+  ],
+  "risk_level": "LOW"
+}

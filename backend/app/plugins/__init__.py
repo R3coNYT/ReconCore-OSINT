@@ -1,0 +1,1 @@
+"""OSINT plugin system."""

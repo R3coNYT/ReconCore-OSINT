@@ -1,0 +1,21 @@
+{
+  "name": "phoneinfoga",
+  "repository": "https://github.com/sundowndev/phoneinfoga",
+  "license": "GPL-3.0",
+  "upstream_version": "2.11.0",
+  "last_upstream_update": "2024-05-01",
+  "last_reviewed": "2026-08-19",
+  "install": "official sundowndev/phoneinfoga container (REST mode) or a release binary",
+  "execution_mode": "api_rest | subprocess | local",
+  "network": "outbound HTTP(S); in local mode no request is sent at all",
+  "credentials_required": false,
+  "vendor_path": null,
+  "review_notes": [
+    "Go binary: verify the release checksum before installing (see docs/PLUGINS.md).",
+    "The numverify/ovh scanners need keys configured ON the PhoneInfoga container, never inside ReconCore.",
+    "REST mode is preferred: the third-party binary stays in its own container.",
+    "The REST API expects digits only; the plugin strips '+' and separators before calling it.",
+    "Local mode sends no request: it only proposes searches."
+  ],
+  "risk_level": "LOW"
+}

@@ -1,0 +1,24 @@
+# Versions minimales : testees de Python 3.11 a 3.14.
+# L'image Docker fige l'environnement (python:3.12-slim) ; ces bornes basses
+# evitent les incompatibilites lors d'une installation locale plus recente.
+fastapi>=0.115.6
+uvicorn[standard]>=0.34.0
+pydantic>=2.10.4
+pydantic-settings>=2.7.0
+SQLAlchemy>=2.0.36
+psycopg[binary]>=3.2.10
+alembic>=1.14.0
+python-multipart>=0.0.20
+PyJWT>=2.10.1
+argon2-cffi>=23.1.0
+cryptography>=44.0.0
+celery>=5.4.0
+redis>=5.2.1
+httpx>=0.28.1
+phonenumbers>=8.13.52
+email-validator>=2.2.0
+python-slugify>=8.0.4
+reportlab>=4.2.5
+typer>=0.15.1
+rich>=13.9.4
+tenacity>=9.0.0

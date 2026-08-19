@@ -1,0 +1,36 @@
+[project]
+name = "reconcore-osint"
+version = "1.0.0"
+description = "Plateforme d'investigation OSINT : correlation, tracabilite, validation humaine"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-or-later" }
+
+[project.scripts]
+osint = "app.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = [
+  "S101",   # assert : utilise dans les tests
+  "E501",   # longueur de ligne geree par le formatage
+  "B008",   # Depends(...) en valeur par defaut : idiome FastAPI
+  "S105",   # faux positifs : "bearer" et les defauts de dev, proteges par le
+            # garde-fou de production dans core/config.py
+  "S607",   # binaires resolus via PATH DANS le conteneur dedie a l'outil ;
+            # l'argv reste explicite et shell=False (voir plugins/runner.py)
+  "UP042",  # StrEnum maison : __str__ explicite, compatible 3.11
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]
