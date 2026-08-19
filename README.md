@@ -37,13 +37,13 @@ Requirements: Docker and Docker Compose. Nothing else — no Python, no Node.
 **Linux, macOS, WSL, Git Bash**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/R3coN/ReconCore-OSINT/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/R3coNYT/ReconCore-OSINT/main/install.sh | sh
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/R3coN/ReconCore-OSINT/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/R3coNYT/ReconCore-OSINT/main/install.ps1 | iex
 ```
 
 From an existing clone, run `./install.sh` (or `.\install.ps1`) instead.

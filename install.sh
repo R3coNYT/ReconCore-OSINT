@@ -27,7 +27,7 @@
 # =============================================================================
 set -eu
 
-REPO_URL="${RECONCORE_REPO:-https://github.com/R3coN/ReconCore-OSINT.git}"
+REPO_URL="${RECONCORE_REPO:-https://github.com/R3coNYT/ReconCore-OSINT.git}"
 TARGET_DIR=""
 ADMIN_EMAIL=""
 ADMIN_PASSWORD=""
@@ -115,6 +115,9 @@ ok "secure random source: $RANDOM_SOURCE"
 
 if [ -f "docker-compose.yml" ] && [ -d "backend/app" ]; then
   ok "running from an existing checkout: $(pwd)"
+  # Prefer the clone's own remote over the built-in default.
+  _origin="$(git config --get remote.origin.url 2>/dev/null || true)"
+  [ -z "$_origin" ] || REPO_URL="$_origin"
 else
   command -v git >/dev/null 2>&1 || die "git is required to clone the repository"
   [ -n "$TARGET_DIR" ] || TARGET_DIR="reconcore-osint"

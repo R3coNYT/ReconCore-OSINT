@@ -24,7 +24,7 @@ param(
     [int]      $Port,
     [string[]] $Plugins,
     [string]   $Directory,
-    [string]   $Repo = 'https://github.com/R3coN/ReconCore-OSINT.git',
+    [string]   $Repo = 'https://github.com/R3coNYT/ReconCore-OSINT.git',
     [switch]   $NoBuild,
     [switch]   $Yes
 )
@@ -106,6 +106,9 @@ Write-Ok 'docker is available'
 
 if ((Test-Path 'docker-compose.yml') -and (Test-Path 'backend/app')) {
     Write-Ok "running from an existing checkout: $(Get-Location)"
+    # Prefer the clone's own remote over the built-in default.
+    $origin = (git config --get remote.origin.url 2>$null)
+    if ($origin) { $Repo = $origin.Trim() }
 } else {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Stop-Install 'git is required to clone the repository'
