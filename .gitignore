@@ -30,3 +30,6 @@ exports/
 Thumbs.db
 .idea/
 .vscode/
+
+# Installer log
+reconcore-install.log
