@@ -22,6 +22,8 @@
 #                           sherlock,holehe,phoneinfoga,websearch)
 #   --dir <path>            clone target directory (default ./reconcore-osint)
 #   --repo <url>            repository to clone
+#   --project-name <name>   compose project name (default: directory name)
+#   --reset-data            wipe an orphaned database volume before install
 #   --no-build              skip `docker compose build`
 #   --yes                   never prompt; requires --email and --password
 # =============================================================================
@@ -35,6 +37,8 @@ HTTP_PORT=""
 PLUGINS=""
 ASSUME_YES=0
 DO_BUILD=1
+PROJECT_NAME=""
+RESET_DATA=0
 DEFAULT_PLUGINS="sherlock,holehe,phoneinfoga,websearch"
 
 RED=''; GREEN=''; YELLOW=''; BLUE=''; BOLD=''; OFF=''
@@ -59,6 +63,8 @@ while [ $# -gt 0 ]; do
     --plugins)  PLUGINS="${2:-}"; shift 2 ;;
     --dir)      TARGET_DIR="${2:-}"; shift 2 ;;
     --repo)     REPO_URL="${2:-}"; shift 2 ;;
+    --project-name) PROJECT_NAME="${2:-}"; shift 2 ;;
+    --reset-data)   RESET_DATA=1; shift ;;
     --no-build) DO_BUILD=0; shift ;;
     --yes|-y)   ASSUME_YES=1; shift ;;
     -h|--help)  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -134,6 +140,27 @@ fi
 
 [ -f ".env.example" ] || die ".env.example not found - is this the right repository?"
 
+# ----------------------------------------------------------- compose project
+
+# Compose derives the project name from the directory name, so two checkouts
+# with the same folder name would share containers and volumes. Pinning it
+# makes the installation self-contained.
+if [ -z "$PROJECT_NAME" ]; then
+  PROJECT_NAME="$(basename "$(pwd)" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_-' '-' | sed 's/-*$//')"
+fi
+ok "compose project: $PROJECT_NAME"
+
+dc() { docker compose -p "$PROJECT_NAME" "$@"; }
+
+_owner="$(docker compose ls --all --format json 2>/dev/null \
+  | tr ',' '\n' | grep -A1 "\"$PROJECT_NAME\"" | grep -i 'ConfigFiles' | head -1 || true)"
+case "$_owner" in
+  "") : ;;
+  *"$(pwd)"*) : ;;
+  *) warn "another checkout may already own the compose project '$PROJECT_NAME'"
+     warn "use --project-name <name> if the stack below is not the one you expect" ;;
+esac
+
 # ------------------------------------------------------------------- secrets
 
 gen_hex() { # 32 bytes, hex
@@ -179,12 +206,28 @@ if [ -f ".env" ]; then
   step "Reusing the existing .env"
   ok "secrets left untouched"
 else
+  # Postgres only applies POSTGRES_PASSWORD when it initialises an empty data
+  # directory. Brand-new secrets against an existing volume would fail
+  # authentication on every query.
+  _volume="$(docker volume ls -q --filter "name=^${PROJECT_NAME}_postgres_data$" 2>/dev/null || true)"
+  if [ -n "$_volume" ]; then
+    if [ "$RESET_DATA" -eq 1 ]; then
+      warn "removing the existing database volume ($_volume)"
+      dc down -v >/dev/null 2>&1 || true
+    else
+      die "a database volume already exists for project '$PROJECT_NAME' but .env is missing.
+  Its password cannot be recovered, so a fresh .env would fail to connect.
+  Either restore the original .env, or re-run with --reset-data to wipe the
+  database and start clean (all stored data is lost)."
+    fi
+  fi
   step "Generating secrets"
   cp .env.example .env
   chmod 600 .env 2>/dev/null || true
   set_env SECRET_KEY "$(gen_hex)"
   set_env SECRETS_ENCRYPTION_KEY "$(gen_fernet)"
   set_env POSTGRES_PASSWORD "$(gen_password)"
+  set_env COMPOSE_PROJECT_NAME "$PROJECT_NAME"
   ok "SECRET_KEY, SECRETS_ENCRYPTION_KEY and POSTGRES_PASSWORD written to .env"
   warn "back up SECRETS_ENCRYPTION_KEY: without it, stored plugin secrets are unrecoverable"
 fi
@@ -215,6 +258,12 @@ fi
 [ -n "$ADMIN_EMAIL" ] || die "an administrator email is required (--email)"
 case "$ADMIN_EMAIL" in *@*.*) : ;; *) die "invalid email: $ADMIN_EMAIL" ;; esac
 
+if [ -z "$ADMIN_PASSWORD" ]; then
+  # A previous attempt may have failed after writing it: reuse it rather
+  # than asking again.
+  ADMIN_PASSWORD="$(get_env FIRST_ADMIN_PASSWORD)"
+  [ -z "$ADMIN_PASSWORD" ] || ok "administrator password taken from .env"
+fi
 if [ -z "$ADMIN_PASSWORD" ] && [ "$INTERACTIVE" -eq 1 ]; then
   while : ; do
     ADMIN_PASSWORD="$(ask_secret 'Administrator password (12+ chars, upper, lower, digit, symbol)')"
@@ -249,20 +298,20 @@ set_env FIRST_ADMIN_PASSWORD "$ADMIN_PASSWORD"
 
 if [ "$DO_BUILD" -eq 1 ]; then
   step "Building the images (first run takes a few minutes)"
-  docker compose build || die "docker compose build failed"
+  dc build || die "docker compose build failed"
   ok "images built"
 else
   warn "build skipped (--no-build)"
 fi
 
 step "Starting the stack"
-docker compose up -d || die "docker compose up failed"
+dc up -d || die "docker compose up failed"
 ok "containers started"
 
 step "Waiting for the API to become healthy"
 _waited=0
 while [ "$_waited" -lt 180 ]; do
-  if docker compose exec -T api python -c "
+  if dc exec -T api python -c "
 import sys, urllib.request
 try:
     sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status == 200 else 1)
@@ -280,8 +329,13 @@ done
 # --------------------------------------------------------------------- setup
 
 step "Creating the schema, the admin account and enabling plugins"
-docker compose exec -T api python -m app.cli setup --enable "$PLUGINS" \
-  || die "setup failed - check: docker compose logs api"
+_setup_log="$(mktemp)"
+if ! dc exec -T api python -m app.cli setup --enable "$PLUGINS" 2>&1 | tee "$_setup_log"; then
+  # Surface the real error instead of a generic failure message.
+  die "setup failed:
+$(tail -n 12 "$_setup_log")"
+fi
+rm -f "$_setup_log"
 
 # The password is no longer needed once the account exists: remove it from .env.
 set_env FIRST_ADMIN_PASSWORD ""

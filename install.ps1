@@ -32,6 +32,8 @@ param(
     [string[]] $Plugins,
     [string]   $Directory,
     [string]   $Repo = 'https://github.com/R3coNYT/ReconCore-OSINT.git',
+    [string]   $ProjectName,
+    [switch]   $ResetData,
     [switch]   $NoBuild,
     [switch]   $Yes
 )
@@ -151,17 +153,60 @@ try {
         Stop-Install '.env.example not found - is this the right repository?'
     }
 
+    # ------------------------------------------------------- compose project
+
+    # Compose derives the project name from the directory name, so two
+    # checkouts with the same folder name would share containers and volumes.
+    # Pinning it makes the installation self-contained.
+    if (-not $ProjectName) {
+        $ProjectName = ((Split-Path -Leaf (Get-Location)).ToLower() -replace '[^a-z0-9_-]', '-').Trim('-')
+    }
+    $composeArgs = @('compose', '-p', $ProjectName)
+    Write-Ok "compose project: $ProjectName"
+
+    $here = (Get-Location).Path
+    $others = $null
+    try { $others = docker compose ls --all --format json | ConvertFrom-Json } catch { }
+    foreach ($p in @($others)) {
+        if ($p.Name -eq $ProjectName -and $p.ConfigFiles -and -not $p.ConfigFiles.StartsWith($here)) {
+            Stop-Install (
+                "another checkout already owns the compose project '$ProjectName':`n" +
+                "    $($p.ConfigFiles)`n" +
+                "Starting here would take over its containers and volumes. Re-run with" +
+                " -ProjectName <other-name>, or remove the other stack first."
+            )
+        }
+    }
+
     # --------------------------------------------------------------- secrets
 
     if (Test-Path '.env') {
         Write-Step 'Reusing the existing .env'
         Write-Ok 'secrets left untouched'
     } else {
+        # Postgres only applies POSTGRES_PASSWORD when it initialises an empty
+        # data directory. Brand-new secrets against an existing volume would
+        # fail authentication on every query.
+        $volume = docker volume ls -q --filter "name=^$($ProjectName)_postgres_data$"
+        if ($volume) {
+            if ($ResetData) {
+                Write-Warn "removing the existing database volume ($volume)"
+                docker @composeArgs down -v *> $null
+            } else {
+                Stop-Install (
+                    "a database volume already exists for project '$ProjectName' but .env is missing.`n" +
+                    "Its password cannot be recovered, so a fresh .env would fail to connect.`n" +
+                    "Either restore the original .env, or re-run with -ResetData to wipe the" +
+                    " database and start clean (all stored data is lost)."
+                )
+            }
+        }
         Write-Step 'Generating secrets'
         Copy-Item '.env.example' '.env'
         Set-EnvValue 'SECRET_KEY'             (New-HexSecret)
         Set-EnvValue 'SECRETS_ENCRYPTION_KEY' (New-FernetKey)
         Set-EnvValue 'POSTGRES_PASSWORD'      (New-DbPassword)
+        Set-EnvValue 'COMPOSE_PROJECT_NAME'   $ProjectName
         Write-Ok 'SECRET_KEY, SECRETS_ENCRYPTION_KEY and POSTGRES_PASSWORD written to .env'
         Write-Warn 'back up SECRETS_ENCRYPTION_KEY: without it, stored plugin secrets are unrecoverable'
     }
@@ -186,6 +231,12 @@ try {
     if (-not $Email) { Stop-Install 'an administrator email is required (-Email)' }
     if ($Email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { Stop-Install "invalid email: $Email" }
 
+    if (-not $Password) {
+        # A previous attempt may have failed after writing it: reuse it
+        # rather than asking again.
+        $Password = Get-EnvValue 'FIRST_ADMIN_PASSWORD'
+        if ($Password) { Write-Ok 'administrator password taken from .env' }
+    }
     if (-not $Password -and -not $Yes) {
         while ($true) {
             $secure  = Read-Host 'Administrator password (12+ chars, upper, lower, digit, symbol)' -AsSecureString
@@ -225,7 +276,7 @@ try {
 
     if (-not $NoBuild) {
         Write-Step 'Building the images (first run takes a few minutes)'
-        docker compose build
+        docker @composeArgs build
         if ($LASTEXITCODE -ne 0) { Stop-Install 'docker compose build failed' }
         Write-Ok 'images built'
     } else {
@@ -233,7 +284,7 @@ try {
     }
 
     Write-Step 'Starting the stack'
-    docker compose up -d
+    docker @composeArgs up -d
     if ($LASTEXITCODE -ne 0) { Stop-Install 'docker compose up failed' }
     Write-Ok 'containers started'
 
@@ -244,7 +295,9 @@ try {
              ";sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=3).status==200 else 1)"
     $waited = 0
     while ($waited -lt 180) {
-        docker compose exec -T api python -c $probe *> $null
+        # 2>&1 into the pipeline: a not-yet-listening API prints a Python
+        # traceback that must not scare the user during normal startup.
+        $null = docker @composeArgs exec -T api python -c $probe 2>&1
         if ($LASTEXITCODE -eq 0) { Write-Ok 'API is up'; break }
         Start-Sleep -Seconds 3
         $waited += 3
@@ -254,8 +307,13 @@ try {
     # ----------------------------------------------------------------- setup
 
     Write-Step 'Creating the schema, the admin account and enabling plugins'
-    docker compose exec -T api python -m app.cli setup --enable $pluginList
-    if ($LASTEXITCODE -ne 0) { Stop-Install 'setup failed - check: docker compose logs api' }
+    $setupOutput = docker @composeArgs exec -T api python -m app.cli setup --enable $pluginList 2>&1
+    $setupOutput | ForEach-Object { Write-Host "  $_" }
+    if ($LASTEXITCODE -ne 0) {
+        # Surface the real error instead of a generic failure message.
+        $tail = ($setupOutput | Select-Object -Last 12) -join "`n"
+        Stop-Install "setup failed:`n$tail"
+    }
 
     # The password is no longer needed once the account exists: remove it from .env.
     Set-EnvValue 'FIRST_ADMIN_PASSWORD' ''
@@ -270,11 +328,10 @@ try {
     Write-Host "  API docs      http://localhost:$Port/docs  (development mode only)"
     Write-Host ''
     Write-Host '  Useful commands:'
-    Write-Host '    docker compose ps                                            service status'
-    Write-Host '    docker compose logs -f api                                   follow the API logs'
-    Write-Host '    docker compose exec api python -m app.cli plugin list         plugin registry'
-    Write-Host '    docker compose exec api python -m app.cli plugin audit all    security reports'
-    Write-Host '    docker compose down                                          stop everything'
+    Write-Host "    docker compose -p $ProjectName ps                             service status"
+    Write-Host "    docker compose -p $ProjectName logs -f api                    follow the API logs"
+    Write-Host "    docker compose -p $ProjectName exec api python -m app.cli plugin list   plugin registry"
+    Write-Host "    docker compose -p $ProjectName down                           stop everything"
     Write-Host ''
     Write-Host '  Reminder: this tool collects personal data from public sources.' -ForegroundColor Yellow
     Write-Host '  Use it only within a lawful, documented framework, and set a retention'
