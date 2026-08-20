@@ -181,7 +181,11 @@ try {
 
     # --------------------------------------------------------------- secrets
 
-    if (Test-Path '.env') {
+    # A .env created from the template during THIS run only holds
+    # placeholders: nothing in it may be mistaken for a real answer.
+    $envExisted = Test-Path '.env'
+
+    if ($envExisted) {
         Write-Step 'Reusing the existing .env'
         Write-Ok 'secrets left untouched'
     } else {
@@ -235,7 +239,8 @@ try {
     Write-Ok "interface will listen on port $Port"
 
     $existingAdmin = Get-EnvValue 'FIRST_ADMIN_EMAIL'
-    if ($existingAdmin -eq 'admin@example.org') { $existingAdmin = '' }
+    if (-not $envExisted -or $existingAdmin -eq 'admin@example.org' -or
+        $existingAdmin.StartsWith('CHANGE_ME')) { $existingAdmin = '' }
 
     if (-not $Email) {
         $Email = if ($existingAdmin) { $existingAdmin } else { Read-Answer 'Administrator email' }
@@ -243,11 +248,17 @@ try {
     if (-not $Email) { Stop-Install 'an administrator email is required (-Email)' }
     if ($Email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { Stop-Install "invalid email: $Email" }
 
-    if (-not $Password) {
+    if (-not $Password -and $envExisted) {
         # A previous attempt may have failed after writing it: reuse it
-        # rather than asking again.
-        $Password = Get-EnvValue 'FIRST_ADMIN_PASSWORD'
-        if ($Password) { Write-Ok 'administrator password taken from .env' }
+        # rather than asking again - unless it is the template placeholder.
+        $stored = Get-EnvValue 'FIRST_ADMIN_PASSWORD'
+        if ($stored -and -not $stored.StartsWith('CHANGE_ME')) {
+            $Password = $stored
+            Write-Ok 'administrator password taken from .env'
+        }
+    }
+    if ($Password -and $Password.StartsWith('CHANGE_ME')) {
+        Stop-Install 'the administrator password is still the .env.example placeholder - choose a real one'
     }
     if (-not $Password -and -not $Yes) {
         while ($true) {

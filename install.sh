@@ -203,7 +203,12 @@ get_env() { # get_env <key>
   grep "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- || true
 }
 
-if [ -f ".env" ]; then
+# A .env created from the template during THIS run only holds placeholders:
+# nothing in it may be mistaken for a real answer.
+ENV_EXISTED=0
+[ -f ".env" ] && ENV_EXISTED=1
+
+if [ "$ENV_EXISTED" -eq 1 ]; then
   step "Reusing the existing .env"
   ok "secrets left untouched"
 else
@@ -255,8 +260,9 @@ set_env HTTP_PORT "$HTTP_PORT"
 ok "interface will listen on port $HTTP_PORT"
 
 EXISTING_ADMIN="$(get_env FIRST_ADMIN_EMAIL)"
+[ "$ENV_EXISTED" -eq 1 ] || EXISTING_ADMIN=""
 case "$EXISTING_ADMIN" in
-  ""|admin@example.org) EXISTING_ADMIN="" ;;
+  ""|admin@example.org|CHANGE_ME*) EXISTING_ADMIN="" ;;
 esac
 
 if [ -z "$ADMIN_EMAIL" ]; then
@@ -269,12 +275,18 @@ fi
 [ -n "$ADMIN_EMAIL" ] || die "an administrator email is required (--email)"
 case "$ADMIN_EMAIL" in *@*.*) : ;; *) die "invalid email: $ADMIN_EMAIL" ;; esac
 
-if [ -z "$ADMIN_PASSWORD" ]; then
+if [ -z "$ADMIN_PASSWORD" ] && [ "$ENV_EXISTED" -eq 1 ]; then
   # A previous attempt may have failed after writing it: reuse it rather
-  # than asking again.
-  ADMIN_PASSWORD="$(get_env FIRST_ADMIN_PASSWORD)"
-  [ -z "$ADMIN_PASSWORD" ] || ok "administrator password taken from .env"
+  # than asking again - unless it is the template placeholder.
+  _stored="$(get_env FIRST_ADMIN_PASSWORD)"
+  case "$_stored" in
+    CHANGE_ME*|"") : ;;
+    *) ADMIN_PASSWORD="$_stored"; ok "administrator password taken from .env" ;;
+  esac
 fi
+case "$ADMIN_PASSWORD" in
+  CHANGE_ME*) die "the administrator password is still the .env.example placeholder - choose a real one" ;;
+esac
 if [ -z "$ADMIN_PASSWORD" ] && [ "$INTERACTIVE" -eq 1 ]; then
   while : ; do
     ADMIN_PASSWORD="$(ask_secret 'Administrator password (12+ chars, upper, lower, digit, symbol)')"
