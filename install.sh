@@ -39,6 +39,7 @@ ASSUME_YES=0
 DO_BUILD=1
 PROJECT_NAME=""
 RESET_DATA=0
+ADOPT_VOLUME=0
 DEFAULT_PLUGINS="sherlock,holehe,phoneinfoga,websearch"
 
 RED=''; GREEN=''; YELLOW=''; BLUE=''; BOLD=''; OFF=''
@@ -215,10 +216,20 @@ else
       warn "removing the existing database volume ($_volume)"
       dc down -v >/dev/null 2>&1 || true
     else
-      die "a database volume already exists for project '$PROJECT_NAME' but .env is missing.
-  Its password cannot be recovered, so a fresh .env would fail to connect.
-  Either restore the original .env, or re-run with --reset-data to wipe the
-  database and start clean (all stored data is lost)."
+      warn "a database from a previous install is still here ($_volume)"
+      warn "its password died with the old .env, but the data itself is intact"
+      _choice="k"
+      if [ "$INTERACTIVE" -eq 1 ]; then
+        say ""
+        say "    [K] Keep the data (recommended) - the database password is reset in place"
+        say "    [W] Wipe it and start from an empty database - everything is lost"
+        say ""
+        _choice="$(ask 'Keep or wipe? (K/W)' 'K')"
+      fi
+      case "$_choice" in
+        w|W) warn "wiping the existing database"; dc down -v >/dev/null 2>&1 || true ;;
+        *)   ADOPT_VOLUME=1; ok "existing data will be kept" ;;
+      esac
     fi
   fi
   step "Generating secrets"
@@ -302,6 +313,34 @@ if [ "$DO_BUILD" -eq 1 ]; then
   ok "images built"
 else
   warn "build skipped (--no-build)"
+fi
+
+if [ "$ADOPT_VOLUME" -eq 1 ]; then
+  step "Adopting the existing database"
+  _pg_user="$(get_env POSTGRES_USER)"
+  [ -n "$_pg_user" ] || _pg_user="reconcore"
+  _pg_pass="$(get_env POSTGRES_PASSWORD)"
+
+  dc up -d postgres || die "could not start postgres"
+
+  _ready=0
+  _i=0
+  while [ "$_i" -lt 40 ]; do
+    if dc exec -T postgres pg_isready -U "$_pg_user" >/dev/null 2>&1; then _ready=1; break; fi
+    _i=$((_i + 1))
+    sleep 2
+  done
+  [ "$_ready" -eq 1 ] || die "postgres did not become ready"
+
+  # The postgres image trusts local socket connections, which is how the
+  # password can be reset without knowing the old one.
+  _escaped="$(printf '%s' "$_pg_pass" | sed "s/'/''/g")"
+  if ! dc exec -T postgres psql -v ON_ERROR_STOP=1 -U "$_pg_user" -d postgres \
+       -c "ALTER USER \"$_pg_user\" WITH PASSWORD '$_escaped';" >/dev/null 2>&1; then
+    die "could not reset the database password.
+  Re-run with --reset-data to start from an empty database instead."
+  fi
+  ok "database password re-synchronised, existing data preserved"
 fi
 
 step "Starting the stack"

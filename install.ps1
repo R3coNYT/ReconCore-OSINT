@@ -108,6 +108,7 @@ function Set-EnvValue {
 try { Start-Transcript -Path $LogFile -Append -Force | Out-Null } catch { }
 
 $failed = $null
+$adoptVolume = $false
 try {
     # ------------------------------------------------------------- preflight
 
@@ -193,12 +194,23 @@ try {
                 Write-Warn "removing the existing database volume ($volume)"
                 docker @composeArgs down -v *> $null
             } else {
-                Stop-Install (
-                    "a database volume already exists for project '$ProjectName' but .env is missing.`n" +
-                    "Its password cannot be recovered, so a fresh .env would fail to connect.`n" +
-                    "Either restore the original .env, or re-run with -ResetData to wipe the" +
-                    " database and start clean (all stored data is lost)."
-                )
+                Write-Warn "a database from a previous install is still here ($volume)"
+                Write-Warn 'its password died with the old .env, but the data itself is intact'
+                $choice = 'k'
+                if (-not $Yes) {
+                    Write-Host ''
+                    Write-Host '    [K] Keep the data (recommended) - the database password is reset in place'
+                    Write-Host '    [W] Wipe it and start from an empty database - everything is lost'
+                    Write-Host ''
+                    $choice = (Read-Answer 'Keep or wipe? (K/W)' 'K').ToLower()
+                }
+                if ($choice -eq 'w') {
+                    Write-Warn 'wiping the existing database'
+                    docker @composeArgs down -v *> $null
+                } else {
+                    $adoptVolume = $true
+                    Write-Ok 'existing data will be kept'
+                }
             }
         }
         Write-Step 'Generating secrets'
@@ -281,6 +293,35 @@ try {
         Write-Ok 'images built'
     } else {
         Write-Warn 'build skipped (-NoBuild)'
+    }
+
+    if ($adoptVolume) {
+        Write-Step 'Adopting the existing database'
+        $pgUser = Get-EnvValue 'POSTGRES_USER'
+        if (-not $pgUser) { $pgUser = 'reconcore' }
+        $pgPass = Get-EnvValue 'POSTGRES_PASSWORD'
+
+        docker @composeArgs up -d postgres
+        if ($LASTEXITCODE -ne 0) { Stop-Install 'could not start postgres' }
+
+        $ready = $false
+        for ($i = 0; $i -lt 40; $i++) {
+            $null = docker @composeArgs exec -T postgres pg_isready -U $pgUser 2>&1
+            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+            Start-Sleep -Seconds 2
+        }
+        if (-not $ready) { Stop-Install 'postgres did not become ready' }
+
+        # The postgres image trusts local socket connections, which is how the
+        # password can be reset without knowing the old one.
+        $escaped = $pgPass.Replace("'", "''")
+        $sql = 'ALTER USER "' + $pgUser + '" WITH PASSWORD ''' + $escaped + ''';'
+        $alter = docker @composeArgs exec -T postgres psql -v ON_ERROR_STOP=1 -U $pgUser -d postgres -c $sql 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Stop-Install ("could not reset the database password:`n" + ($alter -join "`n") +
+                          "`nRe-run with -ResetData to start from an empty database instead.")
+        }
+        Write-Ok 'database password re-synchronised, existing data preserved'
     }
 
     Write-Step 'Starting the stack'
