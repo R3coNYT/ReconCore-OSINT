@@ -132,11 +132,19 @@ class SherlockPlugin(OSINTPlugin):
 
         raw.items = items
         raw.logs.append(f"[INFO] {len(items)} profile(s) found")
+        if result.stderr.strip():
+            raw.logs.append(f"[STDERR] {result.stderr.strip()[-500:]}")
 
         if not items and result.timed_out:
             raw.error = "Sherlock timed out (no usable result)"
-        elif not items and result.returncode not in (0, 1) and result.stderr:
-            raw.error = result.stderr.strip()[:1000]
+        elif result.returncode != 0:
+            # Sherlock exits 0 even when it finds nothing, so any non-zero
+            # code is a real failure. Treating 1 as "no results" used to hide
+            # crashes behind a successful-looking run with zero findings.
+            raw.error = (
+                f"Sherlock exited with code {result.returncode}: "
+                f"{result.stderr.strip()[-500:] or 'no error output'}"
+            )
         return raw
 
     # --------------------------------------------------------------- normalise

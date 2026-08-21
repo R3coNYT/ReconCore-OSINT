@@ -149,10 +149,16 @@ def list_searches(
     investigation_id: uuid.UUID | None = None,
     person_id: uuid.UUID | None = None,
     status_filter: str | None = Query(default=None, alias="status"),
+    unattached: bool = Query(
+        default=False,
+        description="Only searches not attached to any person (quick searches).",
+    ),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[Search]:
     query = select(Search).order_by(Search.created_at.desc())
+    if unattached:
+        query = query.where(Search.person_id.is_(None))
     if investigation_id:
         query = query.where(Search.investigation_id == investigation_id)
     if person_id:

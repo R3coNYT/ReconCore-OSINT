@@ -8,6 +8,7 @@ Examples:
     osint plugin enable sherlock
     osint plugin secret set toutatis sessionid
     osint retention apply
+    osint decisions backfill
 """
 from __future__ import annotations
 
@@ -31,12 +32,14 @@ user_app = typer.Typer(help="User accounts", no_args_is_help=True)
 plugin_app = typer.Typer(help="OSINT plugins", no_args_is_help=True)
 secret_app = typer.Typer(help="Plugin secrets", no_args_is_help=True)
 retention_app = typer.Typer(help="Retention policy", no_args_is_help=True)
+decision_app = typer.Typer(help="Human validation", no_args_is_help=True)
 
 app.add_typer(db_app, name="db")
 app.add_typer(user_app, name="user")
 app.add_typer(plugin_app, name="plugin")
 plugin_app.add_typer(secret_app, name="secret")
 app.add_typer(retention_app, name="retention")
+app.add_typer(decision_app, name="decisions")
 
 
 # ---------------------------------------------------------------------- db
@@ -350,6 +353,39 @@ def retention_apply() -> None:
 
     result = apply_retention()
     console.print(f"[green]Retention applied: {result}[/green]")
+
+
+# -------------------------------------------------------------- decisions
+
+
+@decision_app.command("backfill")
+def decisions_backfill(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would change without writing"
+    ),
+) -> None:
+    """Apply past decisions to the profiles/usernames/identifiers they cover.
+
+    A decision now updates every row describing the same account, but rows
+    decided before that was true kept their own status. This replays them.
+    Idempotent: running it twice changes nothing the second time.
+    """
+    from app.db.session import session_scope
+    from app.services import decisions
+
+    with session_scope() as db:
+        result = decisions.backfill(db, dry_run=dry_run)
+
+    examined = result.pop("examined")
+    moved = sum(result.values())
+    verb = "would be aligned" if dry_run else "aligned"
+    console.print(f"[bold]{examined}[/bold] decided finding(s) examined")
+    for label, count in result.items():
+        console.print(f"  {label:12} {count} {verb}")
+    if dry_run and moved:
+        console.print("[yellow]Dry run: nothing was written.[/yellow]")
+    elif moved == 0:
+        console.print("[green]Every view was already consistent.[/green]")
 
 
 # ---------------------------------------------------------------- one-shot

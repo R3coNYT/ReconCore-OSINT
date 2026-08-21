@@ -193,3 +193,15 @@ class MergeRequest(BaseModel):
     confirm: bool = Field(
         description="Must be true: merging is irreversible and requires confirmation."
     )
+
+
+class ImportSearchRequest(BaseModel):
+    search_id: uuid.UUID
+
+
+class ImportSearchResult(BaseModel):
+    findings_moved: int
+    profiles_created: int
+    identifiers_created: int
+    sources_moved: int
+    runs_moved: int

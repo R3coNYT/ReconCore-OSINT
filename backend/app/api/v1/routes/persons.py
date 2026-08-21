@@ -21,7 +21,12 @@ from app.models.investigation import Person
 from app.models.ops import Search
 from app.models.user import User
 from app.schemas.common import Message, ScoreOut, TimelineEventOut
-from app.schemas.evidence import DuplicateCandidate, MergeRequest
+from app.schemas.evidence import (
+    DuplicateCandidate,
+    ImportSearchRequest,
+    ImportSearchResult,
+    MergeRequest,
+)
 from app.schemas.identity import (
     IdentifierCreate,
     IdentifierCreated,
@@ -45,7 +50,7 @@ from app.schemas.investigation import (
     TagAssign,
 )
 from app.security import audit
-from app.services import correlation, variants
+from app.services import correlation, decisions, variants
 from app.services import identifiers as ident_service
 from app.services.orchestration import compatible_plugins
 
@@ -256,7 +261,7 @@ def update_identifier(
     payload: IdentifierUpdate,
     person: Person = Depends(get_person),
     db: Session = Depends(db_session),
-    _: User = Depends(require_analyst),
+    user: User = Depends(require_analyst),
 ) -> Identifier:
     identifier = db.get(Identifier, identifier_id)
     if identifier is None or identifier.person_id != person.id:
@@ -276,6 +281,22 @@ def update_identifier(
     for field in ("status", "confidence", "is_former", "note"):
         if field in data:
             setattr(identifier, field, data[field].value if hasattr(data[field], "value") else data[field])
+    if "status" in data:
+        # Confidence follows the decision here too, as it does for profiles
+        # and usernames, then the same decision reaches the other tabs.
+        if identifier.status == VerificationStatus.CONFIRMED.value:
+            identifier.confidence = 1.0
+        elif identifier.status == VerificationStatus.REJECTED.value:
+            identifier.confidence = 0.0
+        decisions.propagate(
+            db,
+            person_id=person.id,
+            source_id=identifier.source_id,
+            verification=identifier.status,
+            user_id=user.id,
+            skip=("identifier", identifier.id),
+        )
+        correlation.recompute_person_score(db, person)
     return identifier
 
 
@@ -335,7 +356,7 @@ def update_username(
     payload: UsernameUpdate,
     person: Person = Depends(get_person),
     db: Session = Depends(db_session),
-    _: User = Depends(require_analyst),
+    user: User = Depends(require_analyst),
 ) -> Username:
     username = db.get(Username, username_id)
     if username is None or username.person_id != person.id:
@@ -359,6 +380,16 @@ def update_username(
             username.confidence = 1.0
         elif username.status == VerificationStatus.REJECTED.value:
             username.confidence = 0.0
+        # Same account, same decision, in every other tab.
+        decisions.propagate(
+            db,
+            person_id=person.id,
+            source_id=username.source_id,
+            verification=username.status,
+            user_id=user.id,
+            skip=("username", username.id),
+        )
+        correlation.recompute_person_score(db, person)
     return username
 
 
@@ -496,12 +527,24 @@ def decide_profile(
     elif profile.status == VerificationStatus.REJECTED.value:
         profile.confidence = 0.0
 
+    # The finding, username and identifier documenting this same account must
+    # follow: one decision, one status, whichever tab it was taken from.
+    counts = decisions.propagate(
+        db,
+        person_id=person.id,
+        source_id=profile.source_id,
+        verification=profile.status,
+        user_id=user.id,
+        skip=("profile", profile.id),
+    )
+
     ident_service.add_timeline(
         db,
         person,
         kind="profile_decision",
         message=f"Profile {profile.username}: {payload.status.value}"
-        + (f" ({payload.reason})" if payload.reason else ""),
+        + (f" ({payload.reason})" if payload.reason else "")
+        + decisions.summarize(counts),
         actor=user.email,
         payload={"profile_id": str(profile.id)},
     )
@@ -511,7 +554,11 @@ def decide_profile(
         user=user,
         object_type="social_profile",
         object_id=profile.id,
-        detail={"status": payload.status.value, "reason": payload.reason},
+        detail={
+            "status": payload.status.value,
+            "reason": payload.reason,
+            "propagated": counts,
+        },
         request=request,
     )
     correlation.recompute_person_score(db, person)
@@ -579,6 +626,44 @@ def merge(
         request=request,
     )
     return Message(detail=f"Merge completed: {moved}")
+
+
+@router.post("/{person_id}/import-search", response_model=ImportSearchResult)
+def import_search(
+    payload: ImportSearchRequest,
+    request: Request,
+    person: Person = Depends(get_person),
+    db: Session = Depends(db_session),
+    user: User = Depends(require_analyst),
+) -> dict:
+    """Attach a quick search - and everything it found - to this person.
+
+    Nothing is queried again: the stored results are moved across and the
+    correlation step is replayed for the target person.
+    """
+    from app.models.ops import Search
+    from app.services.ingest import import_search_into_person
+
+    search = db.get(Search, payload.search_id)
+    if search is None:
+        raise HTTPException(status_code=404, detail="Search not found")
+
+    try:
+        stats = import_search_into_person(db, search, person)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    audit.record(
+        db,
+        action="search.imported",
+        user=user,
+        object_type="person",
+        object_id=person.id,
+        message=f"Search {search.target_type}={search.target_value} imported",
+        detail=stats,
+        request=request,
+    )
+    return stats
 
 
 @router.get("/{person_id}/timeline", response_model=list[TimelineEventOut])

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import GraphView from '@/components/GraphView'
 import { Card, Empty, ErrorBox, Loading, Modal, Stat } from '@/components/ui'
@@ -11,6 +11,8 @@ import type { Investigation, Person } from '@/types'
 export default function InvestigationDetail() {
   const { id = '' } = useParams()
   const { can } = useAuth()
+  const client = useQueryClient()
+  const navigate = useNavigate()
   const [creating, setCreating] = useState(false)
 
   const investigation = useQuery({
@@ -20,6 +22,15 @@ export default function InvestigationDetail() {
   const persons = useQuery({
     queryKey: ['investigation-persons', id],
     queryFn: () => api.get<Person[]>(`/investigations/${id}/persons`),
+  })
+
+  // Deletion is permanent server-side, so the button asks for the exact title.
+  const remove = useMutation({
+    mutationFn: () => api.delete(`/investigations/${id}?confirm=true`),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['investigations'] })
+      navigate('/investigations')
+    },
   })
 
   if (investigation.isLoading) return <Loading />
@@ -43,11 +54,33 @@ export default function InvestigationDetail() {
           )}
         </div>
         {can('ANALYST') && (
-          <button className="btn btn-primary" onClick={() => setCreating(true)}>
-            + Add a person
-          </button>
+          <div className="flex gap-2">
+            <button className="btn btn-primary" onClick={() => setCreating(true)}>
+              + Add a person
+            </button>
+            <button
+              className="btn btn-danger"
+              disabled={remove.isPending}
+              onClick={() => {
+                const expected = data.title
+                const typed = window.prompt(
+                  `Permanently delete this case file and everything in it?
+
+` +
+                    `This cannot be undone. Type the title to confirm:
+${expected}`,
+                )
+                if (typed === expected) remove.mutate()
+                else if (typed !== null) window.alert('The title did not match: nothing was deleted.')
+              }}
+            >
+              {remove.isPending ? 'Deleting...' : 'Delete case file'}
+            </button>
+          </div>
         )}
       </header>
+
+      {remove.error != null && <ErrorBox error={remove.error} />}
 
       {stats && (
         <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3">

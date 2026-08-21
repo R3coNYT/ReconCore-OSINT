@@ -13,15 +13,23 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.logging import get_logger
 from app.models.enums import IdentifierType, RunStatus
 from app.models.identity import Platform, SocialProfile
 from app.models.investigation import Person
 from app.models.ops import PluginRun
 from app.plugins import registry
-from app.services.normalization import extract_username_from_url, normalize
+from app.services.normalization import normalize
+
+logger = get_logger(__name__)
 
 #: How long a successful run makes an identical re-run unnecessary.
 FRESHNESS_DAYS = 7
+
+#: Upper bound on the tasks one run may spawn at the next level. Depth is a
+#: multiplier: without a cap, one search can fan out into hundreds of scans
+#: against third-party services.
+MAX_NEXT_LEVEL_TASKS = 20
 
 #: Plugins that must only be triggered in a specific context.
 CONTEXTUAL_PLUGINS = {"toutatis"}
@@ -72,17 +80,20 @@ def next_level_tasks(db: Session, new_targets: list[dict], *, depth: int) -> lis
     """Turn discovered identifiers into runs for the next level."""
     steps: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
+    skipped = 0
 
     for target in new_targets:
         target_type = target["type"]
         value = target["value"]
 
-        # A profile URL becomes an actionable username search.
+        # A profile URL is NOT a source of new usernames. Guessing one from the
+        # path yields generic segments - "profile", "wiki", "photos", "perfil" -
+        # and each of those would launch a full several-hundred-site scan about
+        # somebody else entirely. The username that matters is the one already
+        # searched; a genuinely different handle arrives as an explicit USERNAME
+        # identifier from the plugin that read it.
         if target_type == IdentifierType.SOCIAL_PROFILE.value:
-            username = extract_username_from_url(value)
-            if not username:
-                continue
-            target_type, value = IdentifierType.USERNAME.value, username
+            continue
 
         if target_type not in {
             IdentifierType.USERNAME.value,
@@ -101,6 +112,9 @@ def next_level_tasks(db: Session, new_targets: list[dict], *, depth: int) -> lis
             key = (plugin.name, target_type, normalized)
             if key in seen or _recently_done(db, plugin.name, target_type, normalized):
                 continue
+            if len(steps) >= MAX_NEXT_LEVEL_TASKS:
+                skipped += 1
+                continue
             seen.add(key)
             steps.append(
                 {
@@ -111,6 +125,16 @@ def next_level_tasks(db: Session, new_targets: list[dict], *, depth: int) -> lis
                     "context": {"depth": depth},
                 }
             )
+
+    if skipped:
+        # Never truncate silently: a bounded fan-out that looks exhaustive is
+        # worse than one the analyst knows is bounded.
+        logger.warning(
+            "Depth %s capped at %s task(s): %s candidate(s) not launched",
+            depth,
+            MAX_NEXT_LEVEL_TASKS,
+            skipped,
+        )
     return steps
 
 

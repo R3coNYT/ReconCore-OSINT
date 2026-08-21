@@ -49,6 +49,18 @@ const TABS = [
   ['duplicates', 'Duplicates'],
 ] as const
 
+/**
+ * One decision now updates the finding, the profile, the username and the
+ * identifier that describe the same account (the backend joins them on their
+ * source). Refreshing only the tab the analyst clicked in would leave the
+ * other three showing a stale status from the cache.
+ */
+function invalidateDecisionViews(client: ReturnType<typeof useQueryClient>, personId: string) {
+  for (const key of ['person', 'identifiers', 'usernames', 'profiles', 'findings', 'timeline']) {
+    client.invalidateQueries({ queryKey: [key, personId] })
+  }
+}
+
 const IDENTIFIER_TYPES: IdentifierType[] = [
   'FIRST_NAME', 'LAST_NAME', 'NAME', 'ALIAS', 'USERNAME', 'EMAIL', 'PHONE',
   'ADDRESS', 'CITY', 'DEPARTMENT', 'REGION', 'COUNTRY', 'DOMAIN', 'WEBSITE',
@@ -338,10 +350,7 @@ function Identifiers({ personId }: { personId: string }) {
   const update = useMutation({
     mutationFn: ({ id, status }: { id: string; status: string }) =>
       api.patch(`/persons/${personId}/identifiers/${id}`, { status }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['identifiers', personId] })
-      client.invalidateQueries({ queryKey: ['person', personId] })
-    },
+    onSuccess: () => invalidateDecisionViews(client, personId),
   })
 
   const remove = useMutation({
@@ -447,7 +456,7 @@ function Usernames({ personId }: { personId: string }) {
   const updateStatus = useMutation({
     mutationFn: ({ id, status }: { id: string; status: string }) =>
       api.patch(`/persons/${personId}/usernames/${id}`, { status }),
-    onSuccess: () => client.invalidateQueries({ queryKey: ['usernames', personId] }),
+    onSuccess: () => invalidateDecisionViews(client, personId),
   })
 
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -600,10 +609,7 @@ function Profiles({ personId }: { personId: string }) {
   const decide = useMutation({
     mutationFn: ({ id, status }: { id: string; status: string }) =>
       api.post(`/persons/${personId}/social-profiles/${id}/status`, { status }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['profiles', personId] })
-      client.invalidateQueries({ queryKey: ['person', personId] })
-    },
+    onSuccess: () => invalidateDecisionViews(client, personId),
   })
 
   const platformName = (id: string | null) =>
@@ -761,10 +767,7 @@ function Findings({ personId }: { personId: string }) {
   const decide = useMutation({
     mutationFn: ({ id, decision }: { id: string; decision: string }) =>
       api.post(`/findings/${id}/decision`, { decision }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['findings', personId] })
-      client.invalidateQueries({ queryKey: ['person', personId] })
-    },
+    onSuccess: () => invalidateDecisionViews(client, personId),
   })
 
   return (
@@ -941,13 +944,76 @@ function Timeline({ personId }: { personId: string }) {
 /* -------------------------------------------------------- search history */
 
 function SearchHistory({ personId }: { personId: string }) {
+  const client = useQueryClient()
+  const { can } = useAuth()
   const { data, isLoading } = useQuery({
     queryKey: ['searches', personId],
     queryFn: () => api.get<Search[]>(`/searches${query({ person_id: personId })}`),
     refetchInterval: 10_000,
   })
 
+  // Quick searches run without a person, so their results sit in a technical
+  // case file until they are imported here.
+  const orphans = useQuery({
+    queryKey: ['searches', 'unattached'],
+    queryFn: () => api.get<Search[]>('/searches?unattached=true'),
+  })
+
+  const importSearch = useMutation({
+    mutationFn: (searchId: string) =>
+      api.post(`/persons/${personId}/import-search`, { search_id: searchId }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['searches'] })
+      client.invalidateQueries({ queryKey: ['person', personId] })
+      client.invalidateQueries({ queryKey: ['findings', personId] })
+      client.invalidateQueries({ queryKey: ['profiles', personId] })
+    },
+  })
+
   return (
+    <div className="space-y-4">
+      {orphans.data && orphans.data.length > 0 && can('ANALYST') && (
+        <Card title={`Quick searches not attached to anyone (${orphans.data.length})`}>
+          <p className="text-xs text-slate-500 mb-3">
+            Importing moves the stored results onto this person and re-runs the
+            correlation. Nothing is queried again.
+          </p>
+          {importSearch.error != null && <ErrorBox error={importSearch.error} />}
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Target</th>
+                <th>Status</th>
+                <th>Date</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {orphans.data.map((search) => (
+                <tr key={search.id}>
+                  <td className="font-mono text-xs">
+                    {search.target_type}={search.target_value}
+                  </td>
+                  <td><StatusBadge status={search.status} /></td>
+                  <td className="text-xs text-slate-500">
+                    {new Date(search.created_at).toLocaleString()}
+                  </td>
+                  <td className="text-right">
+                    <button
+                      className="btn btn-primary px-2 py-1"
+                      disabled={importSearch.isPending}
+                      onClick={() => importSearch.mutate(search.id)}
+                    >
+                      Import into this case file
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
     <Card title="Search history">
       {isLoading && <Loading />}
       {data?.length === 0 && <Empty message="No search launched for this person." />}
@@ -986,6 +1052,7 @@ function SearchHistory({ personId }: { personId: string }) {
         </table>
       )}
     </Card>
+    </div>
   )
 }
 

@@ -41,8 +41,15 @@ ENV_ALLOWLIST = (
 )
 
 #: Limits applied to the child process (Unix only).
-DEFAULT_MEMORY_MB = 1024
-DEFAULT_MAX_PROCESSES = 64
+#:
+#: Memory is deliberately NOT limited here. RLIMIT_AS caps virtual address
+#: space, and every thread reserves ~8 MB of it, so a 1 GB cap strangles any
+#: multithreaded tool with "can't start new thread" - Sherlock opens one
+#: thread per site. The container's `mem_limit` already caps *resident*
+#: memory, which is the limit that actually matters; pass `memory_mb`
+#: explicitly only for a single-threaded tool that needs it.
+DEFAULT_MEMORY_MB = None
+DEFAULT_MAX_PROCESSES = 256
 
 
 @dataclass
@@ -71,7 +78,7 @@ def build_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-def _preexec(memory_mb: int, max_processes: int):
+def _preexec(memory_mb: int | None, max_processes: int):
     """POSIX limits applied just before the child exec."""
     if os.name != "posix":  # pragma: no cover - Windows / local dev
         return None
@@ -80,8 +87,9 @@ def _preexec(memory_mb: int, max_processes: int):
 
     def apply() -> None:
         os.setsid()
-        limit = memory_mb * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+        if memory_mb is not None:
+            limit = memory_mb * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
         resource.setrlimit(resource.RLIMIT_NPROC, (max_processes, max_processes))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
@@ -94,7 +102,7 @@ def run_command(
     timeout: int | None = None,
     env_extra: dict[str, str] | None = None,
     stdin_data: str | None = None,
-    memory_mb: int = DEFAULT_MEMORY_MB,
+    memory_mb: int | None = DEFAULT_MEMORY_MB,
     max_processes: int = DEFAULT_MAX_PROCESSES,
     cwd: str | None = None,
 ) -> CommandResult:

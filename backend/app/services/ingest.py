@@ -352,3 +352,79 @@ def _coerce(item: dict) -> dict:
 
 def find_person(db: Session, person_id: uuid.UUID | None) -> Person | None:
     return db.get(Person, person_id) if person_id else None
+
+
+def import_search_into_person(db: Session, search, person: Person) -> dict:
+    """Re-attach a search and everything it produced to a person.
+
+    A quick search runs without a person, so its findings sit at case-file level
+    with nobody to correlate them against. Rather than re-querying the third
+    party services - which the differential search exists to avoid - this moves
+    the stored results across and replays the correlation step, so profiles,
+    usernames, identifiers and the score are rebuilt for the target person.
+    """
+    from app.models.evidence import Source
+    from app.models.ops import PluginRun
+    from app.services.correlation import recompute_person_score
+
+    if search.person_id == person.id:
+        raise ValueError("this search is already attached to that person")
+
+    stats = {
+        "findings_moved": 0,
+        "profiles_created": 0,
+        "identifiers_created": 0,
+        "sources_moved": 0,
+        "runs_moved": 0,
+    }
+    target_investigation = person.investigation_id
+
+    runs = list(
+        db.execute(select(PluginRun).where(PluginRun.search_id == search.id)).scalars().all()
+    )
+
+    for run in runs:
+        run.person_id = person.id
+        run.investigation_id = target_investigation
+        stats["runs_moved"] += 1
+
+        findings = list(
+            db.execute(select(Finding).where(Finding.plugin_run_id == run.id)).scalars().all()
+        )
+        for finding in findings:
+            finding.person_id = person.id
+            finding.investigation_id = target_investigation
+            stats["findings_moved"] += 1
+
+            source = db.get(Source, finding.source_id) if finding.source_id else None
+            if source is not None and source.investigation_id != target_investigation:
+                source.investigation_id = target_investigation
+                stats["sources_moved"] += 1
+
+            # Replay the correlation a person-less search could not perform.
+            if finding.type in PROFILE_KINDS and source is not None:
+                item = {
+                    "kind": finding.type,
+                    "title": finding.title,
+                    "payload": finding.content or {},
+                    "confidence": finding.confidence,
+                    "dedup_key": finding.dedup_key,
+                }
+                _ingest_profile(db, run, person, item, source, finding, stats)
+
+    search.person_id = person.id
+    search.investigation_id = target_investigation
+    db.flush()
+
+    recompute_person_score(db, person)
+    ident_service.add_timeline(
+        db,
+        person,
+        kind="search_imported",
+        message=(
+            f"Results imported from search {search.target_type} = {search.target_value}: "
+            f"{stats['findings_moved']} finding(s)"
+        ),
+        payload={"search_id": str(search.id), **stats},
+    )
+    return stats

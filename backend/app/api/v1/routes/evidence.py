@@ -23,7 +23,7 @@ from app.schemas.evidence import (
     SourceOut,
 )
 from app.security import audit
-from app.services import correlation
+from app.services import correlation, decisions
 from app.services import identifiers as ident_service
 
 router = APIRouter(tags=["evidence"])
@@ -78,6 +78,10 @@ def decide(
         raise HTTPException(status_code=404, detail="Finding not found")
 
     correlation.apply_human_decision(db, finding, payload.decision, user.id)
+    # The profile, username and identifier describing the same account each
+    # carry their own status: without this, three other tabs would keep
+    # contradicting the decision the analyst just made.
+    counts = decisions.propagate_from_finding(db, finding, user_id=user.id)
 
     person = db.get(Person, finding.person_id) if finding.person_id else None
     if person is not None:
@@ -86,7 +90,8 @@ def decide(
             person,
             kind="finding_decision",
             message=f"{finding.title} -> {finding.status}"
-            + (f" ({payload.reason})" if payload.reason else ""),
+            + (f" ({payload.reason})" if payload.reason else "")
+            + decisions.summarize(counts),
             actor=user.email,
             payload={"finding_id": str(finding.id)},
         )
@@ -98,7 +103,11 @@ def decide(
         user=user,
         object_type="finding",
         object_id=finding.id,
-        detail={"decision": payload.decision, "reason": payload.reason},
+        detail={
+            "decision": payload.decision,
+            "reason": payload.reason,
+            "propagated": counts,
+        },
         request=request,
     )
     return finding
